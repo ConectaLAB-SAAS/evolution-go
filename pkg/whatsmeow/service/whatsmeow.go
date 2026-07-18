@@ -76,9 +76,17 @@ type clientVersion struct {
 	Patch int
 }
 
+const authContainerOperationTimeout = 45 * time.Second
+
+type authContainerState struct {
+	mu        sync.Mutex
+	container *sqlstore.Container
+}
+
 type whatsmeowService struct {
 	instanceRepository instance_repository.InstanceRepository
 	authDB             *sql.DB
+	authContainer      *authContainerState
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
@@ -301,55 +309,79 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 	return nil
 }
 
-// Container/pool unico e capado pro store do whatsmeow.
-// Antes, cada StartClient (conectar E cada reconexao) chamava sqlstore.New(), abrindo
-// um *sql.DB novo sem cap e nunca fechado -> leak que saturava o Postgres do evogo_auth.
-// Agora e um container compartilhado, com pool limitado e conexao direta.
-// Somente o sucesso e memorizado: se a criacao falhar (ex.: Postgres indisponivel
-// no boot), a proxima chamada tenta de novo em vez de devolver o erro pra sempre.
-var (
-	sharedAuthContainer   *sqlstore.Container
-	sharedAuthContainerMu sync.Mutex
-)
-
 func (w whatsmeowService) getAuthContainer() (*sqlstore.Container, error) {
-	sharedAuthContainerMu.Lock()
-	defer sharedAuthContainerMu.Unlock()
+	if w.config == nil {
+		return nil, fmt.Errorf("service configuration is not initialized")
+	}
 
-	if sharedAuthContainer != nil {
-		return sharedAuthContainer, nil
+	if w.authContainer == nil {
+		return nil, fmt.Errorf("auth container state is not initialized")
+	}
+
+	w.authContainer.mu.Lock()
+	defer w.authContainer.mu.Unlock()
+
+	if w.authContainer.container != nil {
+		return w.authContainer.container, nil
 	}
 
 	var dbLog waLog.Logger
 	if w.config.WaDebug != "" {
 		dbLog = waLog.Stdout("Database", w.config.WaDebug, true)
 	}
-	var dialect, address string
-	if w.config.PostgresAuthDB != "" {
-		dialect, address = "postgres", w.config.PostgresAuthDB
-	} else {
-		dialect = "sqlite"
-		address = fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-	}
-	db, err := sql.Open(dialect, address)
+
+	db, dialect, ownsDB, err := w.authContainerDB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open auth database: %w", err)
+		return nil, err
 	}
-	if dialect == "postgres" {
-		db.SetMaxOpenConns(20)
-		db.SetMaxIdleConns(5)
-		db.SetConnMaxLifetime(5 * time.Minute)
-		db.SetConnMaxIdleTime(2 * time.Minute)
-	} else {
-		db.SetMaxOpenConns(1)
-	}
+
 	container := sqlstore.NewWithDB(db, dialect, dbLog)
-	if err := container.Upgrade(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to upgrade auth database: %w", err)
+	upgradeCtx, cancel := context.WithTimeout(context.Background(), authContainerOperationTimeout)
+	defer cancel()
+
+	if err := upgradeAuthContainer(upgradeCtx, container, db, ownsDB); err != nil {
+		return nil, err
 	}
-	sharedAuthContainer = container
-	return sharedAuthContainer, nil
+
+	w.authContainer.container = container
+
+	return w.authContainer.container, nil
+}
+
+func (w whatsmeowService) authContainerDB() (*sql.DB, string, bool, error) {
+	if w.config == nil {
+		return nil, "", false, fmt.Errorf("service configuration is not initialized")
+	}
+
+	if w.config.PostgresAuthDB != "" {
+		if w.authDB == nil {
+			return nil, "", false, fmt.Errorf("Postgres auth database is not initialized")
+		}
+
+		return w.authDB, "postgres", false, nil
+	}
+
+	address := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
+	db, err := sql.Open("sqlite", address)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("failed to open SQLite auth database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+
+	return db, "sqlite", true, nil
+}
+
+func upgradeAuthContainer(ctx context.Context, container *sqlstore.Container, db *sql.DB, ownsDB bool) error {
+	if err := container.Upgrade(ctx); err != nil {
+		if ownsDB {
+			_ = db.Close()
+		}
+
+		return fmt.Errorf("failed to upgrade auth database: %w", err)
+	}
+
+	return nil
 }
 
 func (w whatsmeowService) StartClient(cd *ClientData) {
@@ -375,7 +407,9 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	if cd.Instance.Jid != "" {
 		jid, _ := utils.ParseJID(cd.Instance.Jid)
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Jid found. Getting device store for jid: %s", cd.Instance.Id, jid)
-		deviceStore, err = container.GetDevice(context.Background(), jid)
+		deviceCtx, cancel := context.WithTimeout(context.Background(), authContainerOperationTimeout)
+		deviceStore, err = container.GetDevice(deviceCtx, jid)
+		cancel()
 		if err != nil {
 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro ao obter device store: %v", cd.Instance.Id, err)
 			return
@@ -2847,6 +2881,7 @@ func NewWhatsmeowService(
 	return &whatsmeowService{
 		instanceRepository: instanceRepository,
 		authDB:             authDB,
+		authContainer:      &authContainerState{},
 		messageRepository:  messageRepository,
 		labelRepository:    labelRepository,
 		pollService:        pollSvc, // NOVO: Serviço de enquetes
