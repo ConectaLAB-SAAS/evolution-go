@@ -1,0 +1,57 @@
+name: Mirror 0.7.2 poolfix image
+
+on:
+  push:
+    tags:
+      - "mirror-0.7.2-poolfix.2"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-poolfix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror immutable manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Verify immutable inputs
+        shell: bash
+        run: |
+          test "${GITHUB_REF_NAME}" = "mirror-0.7.2-poolfix.2"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy immutable manifest without rebuilding
+        shell: bash
+        env:
+          EXPECTED_DIGEST: sha256:8d5b1b374c284fdedcafc4748894c2162893635fdde556d5bb185d62d389188a
+          SOURCE_IMAGE: ghcr.io/conectalab-saas/evolution-go@sha256:8d5b1b374c284fdedcafc4748894c2162893635fdde556d5bb185d62d389188a
+          DESTINATION_IMAGE: ghcr.io/conectalab-saas/evolution-go-poolfix:0.7.2-poolfix.2
+        run: |
+          source_digest="$(docker buildx imagetools inspect "${SOURCE_IMAGE}" --format '{{.Manifest.Digest}}')"
+          test "${source_digest}" = "${EXPECTED_DIGEST}"
+
+          docker buildx imagetools create --tag "${DESTINATION_IMAGE}" "${SOURCE_IMAGE}"
+
+          destination_digest="$(docker buildx imagetools inspect "${DESTINATION_IMAGE}" --format '{{.Manifest.Digest}}')"
+          test "${destination_digest}" = "${EXPECTED_DIGEST}"
+
+          {
+            echo "Source: \`${SOURCE_IMAGE}\`"
+            echo "Destination: \`${DESTINATION_IMAGE}\`"
+            echo "Verified digest: \`${destination_digest}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
