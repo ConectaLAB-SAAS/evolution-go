@@ -76,9 +76,17 @@ type clientVersion struct {
 	Patch int
 }
 
+const authContainerOperationTimeout = 45 * time.Second
+
+type authContainerState struct {
+	mu        sync.Mutex
+	container *sqlstore.Container
+}
+
 type whatsmeowService struct {
 	instanceRepository instance_repository.InstanceRepository
 	authDB             *sql.DB
+	authContainer      *authContainerState
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
@@ -301,6 +309,81 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 	return nil
 }
 
+func (w whatsmeowService) getAuthContainer() (*sqlstore.Container, error) {
+	if w.config == nil {
+		return nil, fmt.Errorf("service configuration is not initialized")
+	}
+
+	if w.authContainer == nil {
+		return nil, fmt.Errorf("auth container state is not initialized")
+	}
+
+	w.authContainer.mu.Lock()
+	defer w.authContainer.mu.Unlock()
+
+	if w.authContainer.container != nil {
+		return w.authContainer.container, nil
+	}
+
+	var dbLog waLog.Logger
+	if w.config.WaDebug != "" {
+		dbLog = waLog.Stdout("Database", w.config.WaDebug, true)
+	}
+
+	db, dialect, ownsDB, err := w.authContainerDB()
+	if err != nil {
+		return nil, err
+	}
+
+	container := sqlstore.NewWithDB(db, dialect, dbLog)
+	upgradeCtx, cancel := context.WithTimeout(context.Background(), authContainerOperationTimeout)
+	defer cancel()
+
+	if err := upgradeAuthContainer(upgradeCtx, container, db, ownsDB); err != nil {
+		return nil, err
+	}
+
+	w.authContainer.container = container
+
+	return w.authContainer.container, nil
+}
+
+func (w whatsmeowService) authContainerDB() (*sql.DB, string, bool, error) {
+	if w.config == nil {
+		return nil, "", false, fmt.Errorf("service configuration is not initialized")
+	}
+
+	if w.config.PostgresAuthDB != "" {
+		if w.authDB == nil {
+			return nil, "", false, fmt.Errorf("Postgres auth database is not initialized")
+		}
+
+		return w.authDB, "postgres", false, nil
+	}
+
+	address := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
+	db, err := sql.Open("sqlite", address)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("failed to open SQLite auth database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+
+	return db, "sqlite", true, nil
+}
+
+func upgradeAuthContainer(ctx context.Context, container *sqlstore.Container, db *sql.DB, ownsDB bool) error {
+	if err := container.Upgrade(ctx); err != nil {
+		if ownsDB {
+			_ = db.Close()
+		}
+
+		return fmt.Errorf("failed to upgrade auth database: %w", err)
+	}
+
+	return nil
+}
+
 func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
@@ -315,33 +398,18 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	}
 
 	var container *sqlstore.Container
-
-	if w.config.WaDebug != "" {
-		dbLog := waLog.Stdout("Database", w.config.WaDebug, true)
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, dbLog)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, dbLog)
-		}
-	} else {
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, nil)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
-		}
-	}
-
+	container, err = w.getAuthContainer()
 	if err != nil {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to get auth container: %v", cd.Instance.Id, err)
 		return
 	}
 
 	if cd.Instance.Jid != "" {
 		jid, _ := utils.ParseJID(cd.Instance.Jid)
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Jid found. Getting device store for jid: %s", cd.Instance.Id, jid)
-		deviceStore, err = container.GetDevice(context.Background(), jid)
+		deviceCtx, cancel := context.WithTimeout(context.Background(), authContainerOperationTimeout)
+		deviceStore, err = container.GetDevice(deviceCtx, jid)
+		cancel()
 		if err != nil {
 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro ao obter device store: %v", cd.Instance.Id, err)
 			return
@@ -2117,25 +2185,7 @@ func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueN
 		return
 	}
 
-	eventArray := strings.Split(instance.Events, ",")
-
-	var subscriptions []string
-
-	if len(eventArray) < 1 {
-		subscriptions = append(subscriptions, event_types.MESSAGE)
-		subscriptions = append(subscriptions, event_types.SEND_MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Message type discarded: %s", instance.Id, arg)
-				continue
-			}
-			if !utils.Find(subscriptions, arg) {
-				subscriptions = append(subscriptions, arg)
-			}
-
-		}
-	}
+	subscriptions := event_types.ParseSubscribedEvents(instance.Events)
 
 	if contains(subscriptions, "ALL") {
 		w.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Event received of type %s", instance.Id, eventType)
@@ -2363,24 +2413,7 @@ func (w whatsmeowService) StartInstance(instanceId string) error {
 
 	w.userInfoCache.Set(instance.Token, v, cache.NoExpiration)
 
-	eventArray := strings.Split(instance.Events, ",")
-
-	var subscribedEvents []string
-
-	if len(eventArray) < 1 {
-		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)
-				continue
-			}
-			if !utils.Find(subscribedEvents, arg) {
-				subscribedEvents = append(subscribedEvents, arg)
-			}
-
-		}
-	}
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 
 	w.killChannel[instance.Id] = make(chan bool)
 
@@ -2697,22 +2730,7 @@ func (w whatsmeowService) UpdateInstanceSettings(instanceId string) error {
 	myClient.websocketEnable = instance.WebSocketEnable
 
 	// Atualiza as subscriptions se os eventos mudaram
-	eventArray := strings.Split(instance.Events, ",")
-	var subscribedEvents []string
-
-	if len(eventArray) < 1 {
-		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)
-				continue
-			}
-			if !utils.Find(subscribedEvents, arg) {
-				subscribedEvents = append(subscribedEvents, arg)
-			}
-		}
-	}
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 
 	myClient.subscriptions = subscribedEvents
 
@@ -2813,6 +2831,7 @@ func NewWhatsmeowService(
 	return &whatsmeowService{
 		instanceRepository: instanceRepository,
 		authDB:             authDB,
+		authContainer:      &authContainerState{},
 		messageRepository:  messageRepository,
 		labelRepository:    labelRepository,
 		pollService:        pollSvc, // NOVO: Serviço de enquetes

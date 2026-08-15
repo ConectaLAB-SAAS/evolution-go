@@ -1,0 +1,93 @@
+name: Publish 0.7.2 poolfix image
+
+on:
+  push:
+    tags:
+      - "0.7.2-poolfix.3"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-poolfix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish:
+    name: Validate and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.0"
+          cache: true
+
+      - name: Verify pinned release inputs
+        shell: bash
+        run: |
+          test "$(cat VERSION)" = "0.7.2"
+          test "${GITHUB_REF_NAME}" = "0.7.2-poolfix.3"
+
+      - name: Verify formatting
+        shell: bash
+        run: |
+          test -z "$(gofmt -l \
+            pkg/instance/handler/instance_handler.go \
+            pkg/instance/model/instance_model.go \
+            pkg/instance/repository/instance_repository.go \
+            pkg/instance/repository/advanced_settings_test.go \
+            pkg/instance/service/connect_settings.go \
+            pkg/instance/service/connect_settings_test.go \
+            pkg/instance/service/instance_service.go \
+            pkg/internal/event_types/event_types.go \
+            pkg/internal/event_types/event_types_test.go \
+            pkg/whatsmeow/service/whatsmeow.go \
+            pkg/whatsmeow/service/auth_container_retry_test.go)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/conectalab-saas/evolution-go:0.7.2-poolfix.3
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=0.7.2-poolfix.3
+          build-args: VERSION=0.7.2-poolfix.3
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Record image digest
+        shell: bash
+        run: echo "Image digest ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
