@@ -17,6 +17,7 @@ import (
 	"github.com/evolution-foundation/evolution-go/pkg/config"
 	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	instance_repository "github.com/evolution-foundation/evolution-go/pkg/instance/repository"
+	event_types "github.com/evolution-foundation/evolution-go/pkg/internal/event_types"
 	logger_wrapper "github.com/evolution-foundation/evolution-go/pkg/logger"
 	"github.com/evolution-foundation/evolution-go/pkg/utils"
 	whatsmeow_service "github.com/evolution-foundation/evolution-go/pkg/whatsmeow/service"
@@ -238,7 +239,7 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 		}
 	}
 
-	subscribedEvents := splitSubscribedEvents(instance.Events)
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 	eventString := instance.Events
 
 	// Verifica se a instância já está rodando
@@ -307,13 +308,6 @@ func (i instances) Disconnect(instance *instance_model.Instance) (*instance_mode
 		if client.IsLoggedIn() {
 			i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Disconnection successful", instance.Id)
 			i.killChannel[instance.Id] <- true
-
-			instance.Events = ""
-
-			err := i.instanceRepository.Update(instance)
-			if err != nil {
-				return instance, err
-			}
 
 			return instance, nil
 		}
@@ -700,7 +694,7 @@ func (i instances) ForceReconnect(instanceId string, number string) error {
 		return err
 	}
 
-	subscribedEvents := strings.Split(instance.Events, ",")
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 
 	i.killChannel[instance.Id] = make(chan bool)
 

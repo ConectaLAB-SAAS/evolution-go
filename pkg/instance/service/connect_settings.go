@@ -55,22 +55,3 @@ func applyConnectSettings(instance *instance_model.Instance, data *ConnectStruct
 
 	return updates
 }
-
-func splitSubscribedEvents(events string) []string {
-	if events == "" {
-		return []string{event_types.MESSAGE}
-	}
-	parts := strings.Split(events, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		out = append(out, p)
-	}
-	if len(out) == 0 {
-		return []string{event_types.MESSAGE}
-	}
-	return out
-}

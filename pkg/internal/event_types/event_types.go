@@ -1,5 +1,7 @@
 package event_types
 
+import "strings"
+
 const (
 	ALL           = "ALL"
 	MESSAGE       = "MESSAGE"
@@ -61,4 +63,30 @@ var validEventTypes = map[string]bool{
 
 func IsEventType(eventType string) bool {
 	return validEventTypes[eventType]
+}
+
+// ParseSubscribedEvents normalizes persisted subscriptions and keeps MESSAGE
+// as the safe default when the stored value is empty or invalid.
+func ParseSubscribedEvents(events string) []string {
+	subscriptions := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for _, event := range strings.Split(events, ",") {
+		event = strings.TrimSpace(event)
+		if !IsEventType(event) {
+			continue
+		}
+		if _, exists := seen[event]; exists {
+			continue
+		}
+
+		seen[event] = struct{}{}
+		subscriptions = append(subscriptions, event)
+	}
+
+	if len(subscriptions) == 0 {
+		return []string{MESSAGE}
+	}
+
+	return subscriptions
 }

@@ -2185,25 +2185,7 @@ func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueN
 		return
 	}
 
-	eventArray := strings.Split(instance.Events, ",")
-
-	var subscriptions []string
-
-	if len(eventArray) < 1 {
-		subscriptions = append(subscriptions, event_types.MESSAGE)
-		subscriptions = append(subscriptions, event_types.SEND_MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Message type discarded: %s", instance.Id, arg)
-				continue
-			}
-			if !utils.Find(subscriptions, arg) {
-				subscriptions = append(subscriptions, arg)
-			}
-
-		}
-	}
+	subscriptions := event_types.ParseSubscribedEvents(instance.Events)
 
 	if contains(subscriptions, "ALL") {
 		w.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Event received of type %s", instance.Id, eventType)
@@ -2431,24 +2413,7 @@ func (w whatsmeowService) StartInstance(instanceId string) error {
 
 	w.userInfoCache.Set(instance.Token, v, cache.NoExpiration)
 
-	eventArray := strings.Split(instance.Events, ",")
-
-	var subscribedEvents []string
-
-	if len(eventArray) < 1 {
-		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)
-				continue
-			}
-			if !utils.Find(subscribedEvents, arg) {
-				subscribedEvents = append(subscribedEvents, arg)
-			}
-
-		}
-	}
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 
 	w.killChannel[instance.Id] = make(chan bool)
 
@@ -2765,22 +2730,7 @@ func (w whatsmeowService) UpdateInstanceSettings(instanceId string) error {
 	myClient.websocketEnable = instance.WebSocketEnable
 
 	// Atualiza as subscriptions se os eventos mudaram
-	eventArray := strings.Split(instance.Events, ",")
-	var subscribedEvents []string
-
-	if len(eventArray) < 1 {
-		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
-		for _, arg := range eventArray {
-			if !event_types.IsEventType(arg) {
-				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)
-				continue
-			}
-			if !utils.Find(subscribedEvents, arg) {
-				subscribedEvents = append(subscribedEvents, arg)
-			}
-		}
-	}
+	subscribedEvents := event_types.ParseSubscribedEvents(instance.Events)
 
 	myClient.subscriptions = subscribedEvents
 
