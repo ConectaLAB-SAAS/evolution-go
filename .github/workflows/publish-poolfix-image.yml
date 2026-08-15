@@ -3,7 +3,7 @@ name: Publish 0.7.2 poolfix image
 on:
   push:
     tags:
-      - "0.7.2-poolfix.2"
+      - "0.7.2-poolfix.3"
 
 permissions:
   contents: read
@@ -33,12 +33,23 @@ jobs:
         shell: bash
         run: |
           test "$(cat VERSION)" = "0.7.2"
-          test "${GITHUB_REF_NAME}" = "0.7.2-poolfix.2"
+          test "${GITHUB_REF_NAME}" = "0.7.2-poolfix.3"
 
       - name: Verify formatting
         shell: bash
         run: |
-          test -z "$(gofmt -l pkg/whatsmeow/service/whatsmeow.go pkg/whatsmeow/service/auth_container_retry_test.go)"
+          test -z "$(gofmt -l \
+            pkg/instance/handler/instance_handler.go \
+            pkg/instance/model/instance_model.go \
+            pkg/instance/repository/instance_repository.go \
+            pkg/instance/repository/advanced_settings_test.go \
+            pkg/instance/service/connect_settings.go \
+            pkg/instance/service/connect_settings_test.go \
+            pkg/instance/service/instance_service.go \
+            pkg/internal/event_types/event_types.go \
+            pkg/internal/event_types/event_types_test.go \
+            pkg/whatsmeow/service/whatsmeow.go \
+            pkg/whatsmeow/service/auth_container_retry_test.go)"
 
       - name: Vet
         run: go vet ./...
@@ -66,12 +77,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/conectalab-saas/evolution-go:0.7.2-poolfix.2
+          tags: ghcr.io/conectalab-saas/evolution-go:0.7.2-poolfix.3
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=0.7.2-poolfix.2
-          build-args: VERSION=0.7.2-poolfix.2
+            org.opencontainers.image.version=0.7.2-poolfix.3
+          build-args: VERSION=0.7.2-poolfix.3
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
