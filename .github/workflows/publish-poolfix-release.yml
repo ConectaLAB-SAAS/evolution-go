@@ -1,0 +1,86 @@
+name: Publish poolfix runtime release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing poolfix tag and container image tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  publish-runtime-bundle:
+    name: Publish linux/amd64 runtime bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract immutable linux/amd64 runtime
+        id: bundle
+        shell: bash
+        env:
+          IMAGE: ghcr.io/conectalab-saas/evolution-go:${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          digest="$(docker buildx imagetools inspect "$IMAGE" | awk '/^Digest:/ { print $2; exit }')"
+          test -n "$digest"
+
+          docker pull --platform linux/amd64 "$IMAGE"
+          container="evolution-go-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker create --platform linux/amd64 --name "$container" "$IMAGE"
+          trap 'docker rm "$container" >/dev/null 2>&1 || true' EXIT
+
+          mkdir -p bundle
+          docker cp "$container:/app/." bundle/
+          test -x bundle/server
+          test -d bundle/manager
+          test -f bundle/VERSION
+
+          archive=evolution-go-poolfix-linux-amd64.tar.gz
+          tar -C bundle -czf "$archive" server manager VERSION
+          sha256sum "$archive" > "$archive.sha256"
+
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          IMAGE_DIGEST: ${{ steps.bundle.outputs.digest }}
+          SOURCE_SHA: ${{ steps.bundle.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          notes=release-notes.md
+          printf '%s\n\n' 'Public linux/amd64 runtime bundle extracted from the immutable Evolution Go container image. The binary was not rebuilt during release publication.' > "$notes"
+          printf '%s\n' "- Source image: ghcr.io/conectalab-saas/evolution-go@$IMAGE_DIGEST" >> "$notes"
+          printf '%s\n' "- Source digest: $IMAGE_DIGEST" >> "$notes"
+          printf '%s\n' "- Source commit: https://github.com/${GITHUB_REPOSITORY}/commit/$SOURCE_SHA" >> "$notes"
+          printf '%s\n\n' '- Platform: linux/amd64' >> "$notes"
+          printf '%s\n' 'Verify the downloaded archive with the attached .sha256 file before deployment.' >> "$notes"
+
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Evolution Go ${TAG/-/ }" \
+            --notes-file "$notes" \
+            evolution-go-poolfix-linux-amd64.tar.gz \
+            evolution-go-poolfix-linux-amd64.tar.gz.sha256
