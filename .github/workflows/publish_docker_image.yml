@@ -8,6 +8,7 @@ on:
 jobs:
   build_deploy:
     name: Build and Deploy
+    if: github.repository == 'evolution-foundation/evolution-go'
     runs-on: ubuntu-latest
     permissions:
       contents: read
