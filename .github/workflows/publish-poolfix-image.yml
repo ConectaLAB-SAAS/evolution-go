@@ -3,7 +3,7 @@ name: Publish 0.7.2 poolfix image
 on:
   push:
     tags:
-      - "0.7.2-poolfix.4"
+      - "0.7.2-poolfix.5"
 
 permissions:
   contents: read
@@ -26,14 +26,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.25.0"
+          go-version: "1.26.10"
           cache: true
 
       - name: Verify pinned release inputs
         shell: bash
         run: |
           test "$(cat VERSION)" = "0.7.2"
-          test "${GITHUB_REF_NAME}" = "0.7.2-poolfix.4"
+          test "${GITHUB_REF_NAME}" = "0.7.2-poolfix.5"
 
       - name: Verify formatting
         shell: bash
@@ -48,6 +48,7 @@ jobs:
             pkg/instance/service/instance_service.go \
             pkg/internal/event_types/event_types.go \
             pkg/internal/event_types/event_types_test.go \
+            pkg/user/service/user_service.go \
             pkg/whatsmeow/service/whatsmeow.go \
             pkg/whatsmeow/service/auth_container_retry_test.go \
             pkg/whatsmeow/service/client_version_test.go)"
@@ -57,9 +58,6 @@ jobs:
 
       - name: Test
         run: go test ./...
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -76,14 +74,14 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
-          tags: ghcr.io/conectalab-saas/evolution-go:0.7.2-poolfix.4
+          tags: ghcr.io/conectalab-saas/evolution-go:0.7.2-poolfix.5
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=0.7.2-poolfix.4
-          build-args: VERSION=0.7.2-poolfix.4
+            org.opencontainers.image.version=0.7.2-poolfix.5
+          build-args: VERSION=0.7.2-poolfix.5
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
